@@ -1,151 +1,95 @@
 import streamlit as st
 import pandas as pd
-import math
 from pathlib import Path
+from google import genai
+import plotly.express as px
+import io
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+    page_title='Bigcon2025 Yvengers',
+    page_icon=':earth_americas:',
+    layout="wide",
 )
-
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
 
 @st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def get_data():
+    DATA_FILENAME = Path(__file__).parent/'data/data2_cleaned.csv'
+    raw_df = pd.read_csv(DATA_FILENAME)
+    return raw_df
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+df2 = get_data()
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
 '''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
+# :earth_americas: Dataset 2 Visualization
 '''
 
-# Add some spacing
-''
-''
+# 대상 컬럼
+col = "RC_M1_SAA"
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+# 값별 카운트
+counts = df2[col].value_counts().sort_index()
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+# ─────────────────────────────────────────────────────────────
+# (A) Plotly 막대그래프로 렌더 + 이미지 바이트 추출
+# ─────────────────────────────────────────────────────────────
+counts_df = counts.reset_index()
+counts_df.columns = [col, "count"]
 
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
+fig = px.bar(
+    counts_df, x=col, y="count",
+    title=f"{col} 값 분포",
 )
+fig.update_layout(margin=dict(l=10, r=10, t=40, b=10))
 
-''
-''
+st.write("### RC_M1_SAA 분포 (매출금액 구간, Plotly)")
+st.plotly_chart(fig, use_container_width=True)
 
+# Plotly Figure → PNG bytes (kaleido 필요)
+png_bytes = fig.to_image(format="png", scale=2)  # scale로 해상도 업
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+# ─────────────────────────────────────────────────────────────
+# (B) Gemini 2.5 Flash로 이미지 설명 받기
+# ─────────────────────────────────────────────────────────────
+with st.expander("🔎 Gemini 2.5 Flash에게 그래프 설명 요청 (펼치기)"):
+    api_key = st.text_input("Gemini API Key", type="password")
+    user_goal = st.text_area(
+        "설명 프롬프트(옵션)",
+        value=(
+            "이 막대그래프를 한국어로 간결히 설명해줘. "
+            "전반적 분포 특징(집중/치우침/희소 값), 눈에 띄는 구간, "
+            "가능한 인사이트와 주의점(이미지 해상도상 정밀 수치 언급은 자제)을 포함해줘."
+        ),
+    )
+    run = st.button("이미지로 설명 생성")
 
-st.header(f'GDP in {to_year}', divider='gray')
+    if run:
+        if not api_key:
+            st.error("API Key를 입력해 주세요.")
+            st.stop()
 
-''
+        try:
+            client = genai.Client(api_key=api_key)
 
-cols = st.columns(4)
+            # 멀티모달 요청: 텍스트 + 이미지(바이트)
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[{
+                    "role": "user",
+                    "parts": [
+                        {"text": user_goal},
+                        {"inline_data": {"mime_type": "image/png", "data": png_bytes}},
+                    ],
+                }],
+                # 필요시 JSON 모드:
+                # generation_config={"response_mime_type": "application/json"}
+            )
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
+            st.subheader("🧠 Gemini 설명 결과")
+            st.write(resp.text)
 
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
+        except Exception as e:
+            st.error(f"요청 중 오류가 발생했습니다: {e}")
 
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+# 참고: 원래 st.bar_chart(counts)를 유지하고 싶다면, 시각화는 Plotly로 한 번 더 그리고
+#       그 Plotly 이미지를 모델에 보내는 현재 방식이 가장 안정적입니다.
